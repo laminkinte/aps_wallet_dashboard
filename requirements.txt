@@ -1,19 +1,12 @@
-# Streamlit
-streamlit==1.28.1
-
-# Core data stack (Python 3.11 compatible)
-pandas==2.1.4
-numpy==1.26.4
-pyarrow==14.0.2
-
-# Visualization
-plotly==5.22.0
-
-# Excel / CSV exports
-openpyxl==3.1.4
-xlsxwriter==3.2.0
-
-# Utilities
-python-dateutil==2.9.0.post0
-pytz==2024.1
-networkx==3.3
+streamlit>=1.28.0
+pandas>=2.0.0
+numpy>=1.24.0
+plotly>=5.17.0
+altair>=5.0.0
+streamlit-aggrid>=0.3.4
+streamlit-extras>=0.3.0
+streamlit-option-menu>=0.3.6
+plotly-express>=0.4.0
+openpyxl>=3.1.0
+xlsxwriter>=3.1.0
+python-dateutil>=2.8.0
