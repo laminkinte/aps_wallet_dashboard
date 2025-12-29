@@ -19,6 +19,7 @@ import warnings
 import os
 from pathlib import Path
 import time
+import glob
 
 warnings.filterwarnings("ignore")
 
@@ -33,10 +34,25 @@ st.set_page_config(
 )
 
 # =========================
-# Your Windows File Paths
+# File Path Configuration
 # =========================
-ONBOARDING_PATH = r"C:\Users\lamin\Transaction\Onboarding.csv"
-TRANSACTIONS_PATH = r"C:\Users\lamin\Transaction\Transactions.csv"
+# Default paths based on your system
+DEFAULT_PATHS = {
+    "onboarding": [
+        r"C:\Users\lamin\Transaction\Onboarding.csv",
+        r"C:\Users\lamin\Downloads\Onboarding.csv",
+        r"C:\Users\lamin\Desktop\Onboarding.csv",
+        r"C:\Users\lamin\Documents\Onboarding.csv",
+        r"D:\Transaction\Onboarding.csv"
+    ],
+    "transactions": [
+        r"C:\Users\lamin\Transaction\Transactions.csv",
+        r"C:\Users\lamin\Downloads\Transactions.csv",
+        r"C:\Users\lamin\Desktop\Transactions.csv",
+        r"C:\Users\lamin\Documents\Transactions.csv",
+        r"D:\Transaction\Transactions.csv"
+    ]
+}
 
 # =========================
 # Utilities
@@ -52,11 +68,55 @@ def format_percentage(x):
 
 def format_file_size(bytes):
     """Convert bytes to human readable format"""
+    if bytes == 0:
+        return "0 B"
     for unit in ['B', 'KB', 'MB', 'GB']:
         if bytes < 1024.0:
             return f"{bytes:.2f} {unit}"
         bytes /= 1024.0
     return f"{bytes:.2f} TB"
+
+def find_file_in_system(filename):
+    """Search for files in common locations"""
+    search_paths = [
+        r"C:\Users\lamin\*",
+        r"D:\*",
+        r"E:\*",
+        r"C:\Users\*\Downloads\*",
+        r"C:\Users\*\Desktop\*",
+        r"C:\Users\*\Documents\*"
+    ]
+    
+    found_files = []
+    for path in search_paths:
+        search_pattern = os.path.join(os.path.dirname(path), filename)
+        try:
+            matches = glob.glob(search_pattern, recursive=True)
+            found_files.extend(matches)
+        except:
+            continue
+    
+    return found_files[:5]  # Return first 5 matches
+
+def validate_file_path(file_path):
+    """Check if file exists and is readable"""
+    if not file_path or not isinstance(file_path, str):
+        return False, "No file path provided"
+    
+    if not os.path.exists(file_path):
+        return False, f"File not found: {file_path}"
+    
+    if not os.path.isfile(file_path):
+        return False, f"Path is not a file: {file_path}"
+    
+    try:
+        # Try to get file size
+        size = os.path.getsize(file_path)
+        if size == 0:
+            return False, "File is empty"
+        return True, f"File found ({format_file_size(size)})"
+    except Exception as e:
+        return False, f"Error accessing file: {str(e)}"
 
 # =========================
 # Optimized Data Loader for Large Files
@@ -65,62 +125,69 @@ class DataLoader:
     @staticmethod
     def get_file_info(file_path):
         """Get file information including size"""
-        if os.path.exists(file_path):
-            size = os.path.getsize(file_path)
-            return {
-                "exists": True,
-                "size": size,
-                "size_formatted": format_file_size(size),
-                "modified": datetime.fromtimestamp(os.path.getmtime(file_path))
-            }
-        return {"exists": False}
+        if not file_path:
+            return {"exists": False, "error": "No path provided"}
+        
+        if os.path.exists(file_path) and os.path.isfile(file_path):
+            try:
+                size = os.path.getsize(file_path)
+                return {
+                    "exists": True,
+                    "size": size,
+                    "size_formatted": format_file_size(size),
+                    "modified": datetime.fromtimestamp(os.path.getmtime(file_path)),
+                    "path": file_path
+                }
+            except Exception as e:
+                return {"exists": False, "error": str(e)}
+        return {"exists": False, "error": "File not found"}
     
     @staticmethod
-    def load_csv_optimized(file_path, nrows=None, chunksize=100000, required_cols=None):
+    def load_csv_optimized(file_path, nrows=None, chunksize=50000, required_cols=None):
         """
         Load large CSV files efficiently
-        
-        Args:
-            file_path: Path to CSV file
-            nrows: Maximum rows to read (None for all)
-            chunksize: Rows per chunk for processing
-            required_cols: List of required columns to load
         """
         try:
-            if not os.path.exists(file_path):
-                return None
+            if not file_path or not os.path.exists(file_path):
+                return None, "File not found"
             
-            # First, read just the column names to check structure
-            sample_df = pd.read_csv(file_path, nrows=0)
+            # First, read just the header to check structure
+            try:
+                sample_df = pd.read_csv(file_path, nrows=0)
+                if sample_df.empty:
+                    return None, "File appears to be empty or malformed"
+            except Exception as e:
+                return None, f"Error reading file header: {str(e)}"
             
             # If required_cols specified, only load those
             if required_cols:
                 available_cols = [col for col in required_cols if col in sample_df.columns]
                 if not available_cols:
-                    st.warning(f"None of the required columns found in {file_path}")
-                    return None
+                    return None, f"Required columns not found in file"
                 usecols = available_cols
             else:
                 usecols = None
             
-            # Estimate total rows for progress bar
-            if nrows is None:
-                # Count lines for progress estimation (faster than reading entire file)
-                with open(file_path, 'rb') as f:
-                    line_count = sum(1 for _ in f)
-                total_rows = line_count - 1  # Subtract header
-            else:
-                total_rows = min(nrows, 1000000)  # Cap for progress display
-            
             # Initialize progress
-            progress_text = f"Loading {Path(file_path).name}..."
-            progress_bar = st.progress(0, text=progress_text)
+            filename = os.path.basename(file_path)
+            progress_text = f"Loading {filename}..."
             
             # Read in chunks with optimized dtypes
             chunks = []
             rows_read = 0
             
-            for chunk in pd.read_csv(
+            # Create a placeholder for progress
+            progress_placeholder = st.empty()
+            progress_placeholder.text(progress_text)
+            
+            # Get approximate total rows for very large files
+            if nrows:
+                total_rows = min(nrows, 10000000)
+            else:
+                # For very large files, we'll estimate
+                total_rows = 10000000  # Default estimate
+            
+            chunk_iter = pd.read_csv(
                 file_path,
                 chunksize=chunksize,
                 nrows=nrows,
@@ -132,141 +199,165 @@ class DataLoader:
                     'Entity': 'category',
                     'Service Name': 'category'
                 }
-            ):
+            )
+            
+            for chunk in chunk_iter:
                 chunks.append(chunk)
                 rows_read += len(chunk)
                 
-                # Update progress
-                if total_rows > 0:
-                    progress = min(rows_read / total_rows, 1.0)
-                    progress_bar.progress(
-                        progress,
-                        text=f"{progress_text} {rows_read:,} rows loaded"
-                    )
+                # Update progress every 5 chunks
+                if rows_read % (chunksize * 5) == 0:
+                    progress_placeholder.text(f"{progress_text} {rows_read:,} rows loaded...")
             
-            progress_bar.empty()
+            progress_placeholder.empty()
             
             if chunks:
                 df = pd.concat(chunks, ignore_index=True)
-                st.info(f"✅ Loaded {rows_read:,} rows from {Path(file_path).name}")
-                return df
+                return df, f"Loaded {rows_read:,} rows"
             else:
-                return pd.DataFrame()
+                return pd.DataFrame(), "No data loaded"
                 
         except Exception as e:
-            st.error(f"Error loading {file_path}: {str(e)}")
-            return None
+            return None, f"Error loading file: {str(e)}"
 
 # =========================
 # Analytics Engine (Optimized)
 # =========================
 class AnalyticsEngine:
-    def analyze(self, onboarding_df, transactions_df, year, progress_callback=None):
+    def analyze(self, onboarding_df, transactions_df, year):
         """Optimized analysis for large datasets"""
         results = {}
-        
-        # Update progress
-        if progress_callback:
-            progress_callback(10, "Processing dates...")
         
         # Process onboarding data
         if onboarding_df is not None and not onboarding_df.empty:
             # Convert dates efficiently
-            onboarding_df["Registration Date"] = pd.to_datetime(
-                onboarding_df["Registration Date"], errors="coerce", format='mixed'
-            )
+            date_cols = ['Registration Date', 'registration_date', 'REGISTRATION_DATE']
+            onboarding_date_col = None
             
-            # Active agents & tellers
-            results["total_active_agents"] = onboarding_df[
-                (onboarding_df["Entity"] == "AGENT") &
-                (onboarding_df["Status"] == "ACTIVE")
-            ].shape[0]
+            for col in date_cols:
+                if col in onboarding_df.columns:
+                    onboarding_date_col = col
+                    break
             
-            results["total_active_tellers"] = onboarding_df[
-                (onboarding_df["Entity"].str.contains("TELLER", case=False, na=False)) &
-                (onboarding_df["Status"] == "ACTIVE")
-            ].shape[0]
+            if onboarding_date_col:
+                onboarding_df[onboarding_date_col] = pd.to_datetime(
+                    onboarding_df[onboarding_date_col], errors="coerce", format='mixed'
+                )
             
-            # Onboarded in selected year
-            results["onboarded_year"] = onboarding_df[
-                onboarding_df["Registration Date"].dt.year == year
-            ].shape[0]
+            # Find entity and status columns
+            entity_cols = ['Entity', 'entity', 'ENTITY']
+            status_cols = ['Status', 'status', 'STATUS']
+            
+            entity_col = next((col for col in entity_cols if col in onboarding_df.columns), None)
+            status_col = next((col for col in status_cols if col in onboarding_df.columns), None)
+            
+            if entity_col and status_col:
+                # Active agents & tellers
+                results["total_active_agents"] = onboarding_df[
+                    (onboarding_df[entity_col] == "AGENT") &
+                    (onboarding_df[status_col] == "ACTIVE")
+                ].shape[0]
+                
+                results["total_active_tellers"] = onboarding_df[
+                    (onboarding_df[entity_col].astype(str).str.contains("TELLER", case=False, na=False)) &
+                    (onboarding_df[status_col] == "ACTIVE")
+                ].shape[0]
+                
+                # Onboarded in selected year
+                if onboarding_date_col:
+                    results["onboarded_year"] = onboarding_df[
+                        onboarding_df[onboarding_date_col].dt.year == year
+                    ].shape[0]
+                else:
+                    results["onboarded_year"] = 0
+            else:
+                results["total_active_agents"] = 0
+                results["total_active_tellers"] = 0
+                results["onboarded_year"] = 0
         else:
             results["total_active_agents"] = 0
             results["total_active_tellers"] = 0
             results["onboarded_year"] = 0
         
-        if progress_callback:
-            progress_callback(30, "Filtering transactions by year...")
-        
         # Process transactions data
         if transactions_df is not None and not transactions_df.empty:
             # Convert dates efficiently
-            transactions_df["Created At"] = pd.to_datetime(
-                transactions_df["Created At"], errors="coerce", format='mixed'
-            )
+            tx_date_cols = ['Created At', 'created_at', 'CREATED_AT', 'Transaction Date', 'transaction_date']
+            tx_date_col = None
             
-            # Filter by year (more efficient than comparing dt.year directly)
-            transactions_df["Year"] = transactions_df["Created At"].dt.year
-            year_tx = transactions_df[transactions_df["Year"] == year].copy()
+            for col in tx_date_cols:
+                if col in transactions_df.columns:
+                    tx_date_col = col
+                    break
             
-            results["total_transactions"] = year_tx.shape[0]
-            results["total_volume"] = year_tx["Amount"].sum() if "Amount" in year_tx.columns else 0
-            
-            if progress_callback:
-                progress_callback(50, "Analyzing services...")
-            
-            # Service breakdown (sample if too large)
-            if len(year_tx) > 1000000:
-                st.warning("Large dataset detected, sampling 1M rows for service analysis")
-                sample_tx = year_tx.sample(n=1000000, random_state=42)
-            else:
-                sample_tx = year_tx
-            
-            if "Service Name" in sample_tx.columns and "Amount" in sample_tx.columns:
-                service_summary = (
-                    sample_tx.groupby("Service Name")["Amount"]
-                    .agg(["count", "sum"])
-                    .reset_index()
+            if tx_date_col:
+                transactions_df[tx_date_col] = pd.to_datetime(
+                    transactions_df[tx_date_col], errors="coerce", format='mixed'
                 )
-                service_summary.columns = ["Service Name", "Transaction Count", "Total Amount"]
-                results["service_summary"] = service_summary
-            else:
-                results["service_summary"] = pd.DataFrame()
             
-            if progress_callback:
-                progress_callback(70, "Calculating monthly trends...")
+            # Find amount and service columns
+            amount_cols = ['Amount', 'amount', 'AMOUNT']
+            service_cols = ['Service Name', 'service_name', 'SERVICE_NAME', 'Service', 'service']
             
-            # Monthly trend
-            if not year_tx.empty:
-                year_tx["month"] = year_tx["Created At"].dt.month
-                monthly = (
-                    year_tx.groupby("month")["Amount"]
-                    .agg(["sum", "count"])
-                    .reset_index()
-                )
-                monthly.columns = ["month", "Total Amount", "Transaction Count"]
-                results["monthly_trend"] = monthly
-            else:
-                results["monthly_trend"] = pd.DataFrame()
+            amount_col = next((col for col in amount_cols if col in transactions_df.columns), None)
+            service_col = next((col for col in service_cols if col in transactions_df.columns), None)
+            
+            if tx_date_col and amount_col:
+                # Filter by year
+                transactions_df["Year"] = transactions_df[tx_date_col].dt.year
+                year_tx = transactions_df[transactions_df["Year"] == year].copy()
                 
+                results["total_transactions"] = year_tx.shape[0]
+                results["total_volume"] = year_tx[amount_col].sum()
+                
+                # Service breakdown
+                if service_col and not year_tx.empty:
+                    # Sample if too large
+                    if len(year_tx) > 1000000:
+                        sample_size = min(1000000, len(year_tx))
+                        sample_tx = year_tx.sample(n=sample_size, random_state=42)
+                    else:
+                        sample_tx = year_tx
+                    
+                    service_summary = (
+                        sample_tx.groupby(service_col)[amount_col]
+                        .agg(["count", "sum"])
+                        .reset_index()
+                    )
+                    service_summary.columns = ["Service Name", "Transaction Count", "Total Amount"]
+                    results["service_summary"] = service_summary
+                else:
+                    results["service_summary"] = pd.DataFrame()
+                
+                # Monthly trend
+                if not year_tx.empty:
+                    year_tx["month"] = year_tx[tx_date_col].dt.month
+                    monthly = (
+                        year_tx.groupby("month")[amount_col]
+                        .agg(["sum", "count"])
+                        .reset_index()
+                    )
+                    monthly.columns = ["month", "Total Amount", "Transaction Count"]
+                    results["monthly_trend"] = monthly
+                else:
+                    results["monthly_trend"] = pd.DataFrame()
+                    
+            else:
+                results["total_transactions"] = 0
+                results["total_volume"] = 0
+                results["service_summary"] = pd.DataFrame()
+                results["monthly_trend"] = pd.DataFrame()
         else:
             results["total_transactions"] = 0
             results["total_volume"] = 0
             results["service_summary"] = pd.DataFrame()
             results["monthly_trend"] = pd.DataFrame()
         
-        if progress_callback:
-            progress_callback(90, "Finalizing results...")
-        
         # Calculate additional metrics
         if results["total_transactions"] > 0:
             results["avg_transaction"] = results["total_volume"] / results["total_transactions"]
         else:
             results["avg_transaction"] = 0
-        
-        if progress_callback:
-            progress_callback(100, "Analysis complete!")
         
         return results
 
@@ -291,6 +382,30 @@ def metric_card(title, value, subtitle=""):
     )
 
 # =========================
+# Initialize Session State
+# =========================
+if "onboarding_path" not in st.session_state:
+    # Try to find onboarding file
+    found_files = find_file_in_system("Onboarding.csv")
+    if found_files:
+        st.session_state.onboarding_path = found_files[0]
+    else:
+        st.session_state.onboarding_path = DEFAULT_PATHS["onboarding"][0]
+
+if "transactions_path" not in st.session_state:
+    # Try to find transactions file
+    found_files = find_file_in_system("Transactions.csv")
+    if found_files:
+        st.session_state.transactions_path = found_files[0]
+    else:
+        st.session_state.transactions_path = DEFAULT_PATHS["transactions"][0]
+
+if "results" not in st.session_state:
+    st.session_state.results = None
+if "data_loaded" not in st.session_state:
+    st.session_state.data_loaded = False
+
+# =========================
 # Sidebar Configuration
 # =========================
 st.sidebar.image(
@@ -305,31 +420,59 @@ st.sidebar.markdown(
 
 st.sidebar.markdown("---")
 
-# Display file information
-st.sidebar.subheader("📂 File Information")
+# File Path Configuration
+st.sidebar.subheader("📂 File Configuration")
 
-onboarding_info = DataLoader.get_file_info(ONBOARDING_PATH)
-transactions_info = DataLoader.get_file_info(TRANSACTIONS_PATH)
+# Onboarding file path
+onboarding_path = st.sidebar.text_input(
+    "Onboarding CSV Path",
+    value=st.session_state.onboarding_path,
+    help="Enter full path to Onboarding.csv file"
+)
 
+# Transactions file path
+transactions_path = st.sidebar.text_input(
+    "Transactions CSV Path",
+    value=st.session_state.transactions_path,
+    help="Enter full path to Transactions.csv file"
+)
+
+# File search buttons
 col1, col2 = st.sidebar.columns(2)
-
 with col1:
-    if onboarding_info["exists"]:
-        st.success("✓ Onboarding")
-        st.caption(f"{onboarding_info['size_formatted']}")
-    else:
-        st.error("✗ Onboarding")
+    if st.button("🔍 Find Onboarding", use_container_width=True):
+        found_files = find_file_in_system("Onboarding.csv")
+        if found_files:
+            st.session_state.onboarding_path = found_files[0]
+            st.rerun()
+        else:
+            st.sidebar.warning("No Onboarding.csv files found")
 
 with col2:
-    if transactions_info["exists"]:
-        st.success("✓ Transactions")
-        st.caption(f"{transactions_info['size_formatted']}")
-    else:
-        st.error("✗ Transactions")
+    if st.button("🔍 Find Transactions", use_container_width=True):
+        found_files = find_file_in_system("Transactions.csv")
+        if found_files:
+            st.session_state.transactions_path = found_files[0]
+            st.rerun()
+        else:
+            st.sidebar.warning("No Transactions.csv files found")
 
-if onboarding_info["exists"] and transactions_info["exists"]:
-    total_size = onboarding_info["size"] + transactions_info["size"]
-    st.sidebar.info(f"**Total:** {format_file_size(total_size)}")
+# Validate file paths
+st.sidebar.markdown("---")
+st.sidebar.subheader("✅ File Validation")
+
+onboarding_valid, onboarding_msg = validate_file_path(onboarding_path)
+transactions_valid, transactions_msg = validate_file_path(transactions_path)
+
+if onboarding_valid:
+    st.sidebar.success(f"Onboarding: {onboarding_msg}")
+else:
+    st.sidebar.error(f"Onboarding: {onboarding_msg}")
+
+if transactions_valid:
+    st.sidebar.success(f"Transactions: {transactions_msg}")
+else:
+    st.sidebar.error(f"Transactions: {transactions_msg}")
 
 st.sidebar.markdown("---")
 
@@ -342,127 +485,28 @@ analysis_year = st.sidebar.selectbox(
     index=2
 )
 
-# Sampling options for large files
+# Sampling options
 sample_percentage = st.sidebar.slider(
-    "Sample Percentage (for testing)",
+    "Sample Percentage",
     min_value=1,
     max_value=100,
-    value=100,
+    value=10,
     help="Use lower percentage for faster testing with large files"
 )
 
-if sample_percentage < 100:
-    st.sidebar.warning(f"⚠️ Using {sample_percentage}% sample for testing")
+st.sidebar.markdown(f"**Note:** Using {sample_percentage}% sample for testing")
 
-process_btn = st.sidebar.button("🚀 Process Data", type="primary", use_container_width=True)
+process_btn = st.sidebar.button("🚀 Process Data", type="primary", use_container_width=True, 
+                               disabled=not (onboarding_valid and transactions_valid))
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(
-    "<p style='text-align:center;font-size:12px;'>APS Wallet Analytics v3.0 | Optimized for Large Files</p>",
+    "<p style='text-align:center;font-size:12px;'>APS Wallet Analytics v3.1 • File Finder Enabled</p>",
     unsafe_allow_html=True
 )
 
 # =========================
-# Session State
-# =========================
-if "results" not in st.session_state:
-    st.session_state.results = None
-if "data_loaded" not in st.session_state:
-    st.session_state.data_loaded = False
-if "analysis_year" not in st.session_state:
-    st.session_state.analysis_year = None
-if "processing_time" not in st.session_state:
-    st.session_state.processing_time = 0
-
-# =========================
-# Progress Callback
-# =========================
-def update_progress(percent, message):
-    progress_bar.progress(percent / 100, text=message)
-
-# =========================
-# Process Data
-# =========================
-if process_btn:
-    start_time = time.time()
-    
-    # Check if files exist
-    if not os.path.exists(ONBOARDING_PATH):
-        st.error(f"Onboarding file not found: {ONBOARDING_PATH}")
-        st.stop()
-    
-    if not os.path.exists(TRANSACTIONS_PATH):
-        st.error(f"Transactions file not found: {TRANSACTIONS_PATH}")
-        st.stop()
-    
-    # Create progress container
-    progress_container = st.empty()
-    with progress_container.container():
-        st.subheader("🔄 Processing Data...")
-        progress_bar = st.progress(0, text="Initializing...")
-    
-    try:
-        # Initialize loader and engine
-        loader = DataLoader()
-        analytics = AnalyticsEngine()
-        
-        # Calculate sample size
-        if sample_percentage < 100:
-            # Estimate rows to sample based on file size
-            transactions_size = transactions_info["size"]
-            target_size = (sample_percentage / 100) * 10000000  # Target ~10M rows max
-            sample_rows = int((target_size / transactions_size) * 50000000)  # Rough estimate
-            st.info(f"Sampling approximately {sample_rows:,} rows ({sample_percentage}%)")
-        else:
-            sample_rows = None
-        
-        # Load data with progress updates
-        update_progress(5, "Loading onboarding data...")
-        df_onboarding = loader.load_csv_optimized(
-            ONBOARDING_PATH,
-            required_cols=['Registration Date', 'Entity', 'Status']
-        )
-        
-        update_progress(20, "Loading transactions data...")
-        df_transactions = loader.load_csv_optimized(
-            TRANSACTIONS_PATH,
-            nrows=sample_rows,
-            required_cols=['Created At', 'Amount', 'Service Name']
-        )
-        
-        if df_onboarding is None or df_transactions is None:
-            st.error("Failed to load data. Check file formats and paths.")
-            st.stop()
-        
-        # Perform analysis
-        st.session_state.results = analytics.analyze(
-            df_onboarding, df_transactions, analysis_year, update_progress
-        )
-        
-        # Store additional info
-        st.session_state.data_loaded = True
-        st.session_state.analysis_year = analysis_year
-        st.session_state.df_onboarding = df_onboarding
-        st.session_state.df_transactions = df_transactions
-        
-        # Calculate processing time
-        processing_time = time.time() - start_time
-        st.session_state.processing_time = processing_time
-        
-        # Clear progress container
-        progress_container.empty()
-        
-        st.success(f"✅ Analysis completed in {processing_time:.1f} seconds!")
-        
-    except Exception as e:
-        progress_container.empty()
-        st.error(f"❌ Error during processing: {str(e)}")
-        import traceback
-        with st.expander("Error Details"):
-            st.code(traceback.format_exc())
-
-# =========================
-# Main Content
+# Main Content - Welcome Screen
 # =========================
 st.markdown(
     f"""
@@ -476,15 +520,175 @@ st.markdown(
     unsafe_allow_html=True
 )
 
+if not onboarding_valid or not transactions_valid:
+    # Show troubleshooting guide
+    st.markdown("## 🔍 File Not Found - Troubleshooting Guide")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        st.error("### Issue Detected")
+        st.write("The application cannot find your CSV files. This could be due to:")
+        st.write("1. **Incorrect file path**")
+        st.write("2. **Files in different location**")
+        st.write("3. **File permission issues**")
+        st.write("4. **Files have different names**")
+        
+        st.markdown("### 🔧 Quick Fixes:")
+        
+        if st.button("🔄 Use Sample Data for Demo", type="secondary"):
+            # Generate sample data for demo
+            st.session_state.use_sample_data = True
+            st.rerun()
+    
+    with col2:
+        st.info("### 📋 How to Find Your Files")
+        st.write("**Option 1:** Use the 🔍 Find buttons in sidebar")
+        st.write("**Option 2:** Manually enter correct paths:")
+        
+        st.code("""
+        Common locations to check:
+        
+        C:\\Users\\lamin\\Downloads\\
+        C:\\Users\\lamin\\Desktop\\
+        C:\\Users\\lamin\\Documents\\
+        D:\\ (if you have another drive)
+        
+        Right-click file → Properties → Copy Location
+        """)
+        
+        st.write("**Option 3:** Check file names are exactly:")
+        st.write("- `Onboarding.csv` (case may vary)")
+        st.write("- `Transactions.csv` (case may vary)")
+    
+    # Show file search results
+    with st.expander("🔎 Search for CSV files on your system"):
+        st.write("Searching for CSV files...")
+        
+        # Search for CSV files
+        csv_files = []
+        search_locations = [
+            r"C:\Users\lamin\**\*.csv",
+            r"D:\**\*.csv",
+            r"C:\Users\*\Downloads\**\*.csv",
+            r"C:\Users\*\Desktop\**\*.csv"
+        ]
+        
+        for location in search_locations:
+            try:
+                files = glob.glob(location, recursive=True)
+                csv_files.extend(files)
+            except:
+                continue
+        
+        # Filter for likely APS files
+        aps_files = []
+        other_csv = []
+        
+        for file in csv_files[:50]:  # Limit to first 50
+            filename = os.path.basename(file).lower()
+            if 'onboarding' in filename or 'transaction' in filename or 'aps' in filename:
+                aps_files.append(file)
+            else:
+                other_csv.append(file)
+        
+        if aps_files:
+            st.success("Found possible APS files:")
+            for file in aps_files[:10]:  # Show first 10
+                size = format_file_size(os.path.getsize(file)) if os.path.exists(file) else "Unknown"
+                if st.button(f"📁 {os.path.basename(file)} ({size})", key=file):
+                    if 'onboarding' in file.lower():
+                        st.session_state.onboarding_path = file
+                    else:
+                        st.session_state.transactions_path = file
+                    st.rerun()
+        
+        if other_csv:
+            with st.expander("See all CSV files found"):
+                for file in other_csv[:20]:
+                    st.text(f"• {file}")
+
+# =========================
+# Process Data
+# =========================
+if process_btn:
+    if not onboarding_valid or not transactions_valid:
+        st.error("Please fix file paths before processing")
+        st.stop()
+    
+    start_time = time.time()
+    
+    # Create processing container
+    with st.spinner(f"Processing {sample_percentage}% of data..."):
+        try:
+            # Initialize loader and engine
+            loader = DataLoader()
+            analytics = AnalyticsEngine()
+            
+            # Calculate sample rows
+            transactions_info = loader.get_file_info(transactions_path)
+            if transactions_info["exists"]:
+                # Estimate rows based on file size (rough estimate: 1MB ≈ 10,000 rows)
+                estimated_rows = int((transactions_info["size"] / (1024 * 1024)) * 10000)
+                sample_rows = int((sample_percentage / 100) * estimated_rows)
+                sample_rows = min(sample_rows, 5000000)  # Cap at 5M rows
+            else:
+                sample_rows = 100000
+            
+            # Load data
+            st.info(f"Loading data (sampling {sample_rows:,} rows)...")
+            
+            df_onboarding, onboarding_msg = loader.load_csv_optimized(
+                onboarding_path,
+                required_cols=['Registration Date', 'registration_date', 'Entity', 'entity', 'Status', 'status']
+            )
+            
+            if df_onboarding is not None:
+                st.success(f"Onboarding: {onboarding_msg}")
+            else:
+                st.error(f"Failed to load onboarding: {onboarding_msg}")
+                st.stop()
+            
+            df_transactions, transactions_msg = loader.load_csv_optimized(
+                transactions_path,
+                nrows=sample_rows,
+                required_cols=['Created At', 'created_at', 'Amount', 'amount', 'Service Name', 'service_name']
+            )
+            
+            if df_transactions is not None:
+                st.success(f"Transactions: {transactions_msg}")
+            else:
+                st.error(f"Failed to load transactions: {transactions_msg}")
+                st.stop()
+            
+            # Perform analysis
+            st.info("Analyzing data...")
+            st.session_state.results = analytics.analyze(
+                df_onboarding, df_transactions, analysis_year
+            )
+            
+            # Store data
+            st.session_state.data_loaded = True
+            st.session_state.df_onboarding = df_onboarding
+            st.session_state.df_transactions = df_transactions
+            st.session_state.processing_time = time.time() - start_time
+            st.session_state.sample_percentage = sample_percentage
+            
+            st.success(f"✅ Analysis completed in {st.session_state.processing_time:.1f} seconds!")
+            
+        except Exception as e:
+            st.error(f"❌ Error during processing: {str(e)}")
+            st.info("Try reducing the sample percentage or checking file formats")
+
+# =========================
+# Display Results
+# =========================
 if st.session_state.results and st.session_state.data_loaded:
     r = st.session_state.results
     
-    # Display processing info
-    if st.session_state.processing_time > 0:
-        st.caption(f"Processed in {st.session_state.processing_time:.1f} seconds")
-    
-    if sample_percentage < 100:
-        st.warning(f"⚠️ Displaying results from {sample_percentage}% sample data")
+    # Show sample warning
+    if st.session_state.sample_percentage < 100:
+        st.warning(f"⚠️ Showing results from {st.session_state.sample_percentage}% sample data")
     
     # =========================
     # KPIs Section
@@ -510,29 +714,13 @@ if st.session_state.results and st.session_state.data_loaded:
     vol_col1, vol_col2, vol_col3 = st.columns(3)
     
     with vol_col1:
-        st.metric(
-            "Total Volume",
-            format_currency(r["total_volume"]),
-            help="Total transaction amount for the year"
-        )
+        st.metric("Total Volume", format_currency(r["total_volume"]))
     
     with vol_col2:
-        st.metric(
-            "Average Transaction",
-            format_currency(r.get("avg_transaction", 0)),
-            help="Average amount per transaction"
-        )
+        st.metric("Average Transaction", format_currency(r.get("avg_transaction", 0)))
     
     with vol_col3:
-        if r["total_transactions"] > 0 and r["onboarded_year"] > 0:
-            tx_per_agent = r["total_transactions"] / r["onboarded_year"]
-            st.metric(
-                "Tx per New Agent",
-                f"{tx_per_agent:,.0f}",
-                help="Average transactions per newly onboarded agent"
-            )
-        else:
-            st.metric("Tx per New Agent", "N/A")
+        st.metric("Sample Size", f"{st.session_state.sample_percentage}%")
     
     # =========================
     # Service Breakdown
@@ -548,17 +736,7 @@ if st.session_state.results and st.session_state.data_loaded:
                 x="Service Name",
                 y="Total Amount",
                 color="Service Name",
-                title=f"Transaction Value by Service ({analysis_year})",
-                text="Total Amount"
-            )
-            fig_service_value.update_traces(
-                texttemplate='GMD %{text:,.0f}',
-                textposition='outside'
-            )
-            fig_service_value.update_layout(
-                yaxis_title="Amount (GMD)",
-                xaxis_title="Service",
-                height=500
+                title=f"Transaction Value by Service ({analysis_year})"
             )
             st.plotly_chart(fig_service_value, use_container_width=True)
         
@@ -567,21 +745,9 @@ if st.session_state.results and st.session_state.data_loaded:
                 r["service_summary"],
                 names="Service Name",
                 values="Transaction Count",
-                title=f"Transaction Count Distribution ({analysis_year})",
-                hole=0.3
-            )
-            fig_service_count.update_traces(
-                textinfo='percent+label',
-                textposition='inside'
+                title=f"Transaction Count Distribution ({analysis_year})"
             )
             st.plotly_chart(fig_service_count, use_container_width=True)
-        
-        # Service details table
-        with st.expander("📋 View Service Details"):
-            st.dataframe(
-                r["service_summary"].sort_values("Total Amount", ascending=False),
-                use_container_width=True
-            )
     else:
         st.info("No service breakdown data available")
     
@@ -591,222 +757,73 @@ if st.session_state.results and st.session_state.data_loaded:
     st.markdown("## 📅 Monthly Transaction Trend")
     
     if not r["monthly_trend"].empty:
-        # Create subplots
         fig = make_subplots(
             rows=2, cols=1,
-            subplot_titles=(f'Transaction Volume ({analysis_year})', f'Transaction Count ({analysis_year})'),
-            vertical_spacing=0.15
+            subplot_titles=(f'Transaction Volume ({analysis_year})', f'Transaction Count ({analysis_year})')
         )
         
-        # Add volume line
         fig.add_trace(
             go.Scatter(
                 x=r["monthly_trend"]["month"],
                 y=r["monthly_trend"]["Total Amount"],
-                mode='lines+markers+text',
-                name='Volume',
-                line=dict(color='#1E3A8A', width=3),
-                text=[format_currency(x) for x in r["monthly_trend"]["Total Amount"]],
-                textposition="top center"
+                mode='lines+markers',
+                name='Volume'
             ),
             row=1, col=1
         )
         
-        # Add count bar
         fig.add_trace(
             go.Bar(
                 x=r["monthly_trend"]["month"],
                 y=r["monthly_trend"]["Transaction Count"],
-                name='Count',
-                marker_color='#3B82F6',
-                text=r["monthly_trend"]["Transaction Count"],
-                textposition='outside'
+                name='Count'
             ),
             row=2, col=1
         )
         
-        # Update layout
-        month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 
-                      'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-        fig.update_xaxes(
-            ticktext=month_names[:len(r["monthly_trend"])],
-            tickvals=r["monthly_trend"]["month"],
-            row=1, col=1
-        )
-        fig.update_xaxes(
-            ticktext=month_names[:len(r["monthly_trend"])],
-            tickvals=r["monthly_trend"]["month"],
-            row=2, col=1
-        )
-        
-        fig.update_yaxes(title_text="Amount (GMD)", row=1, col=1)
-        fig.update_yaxes(title_text="Transaction Count", row=2, col=1)
-        fig.update_layout(height=700, showlegend=True)
-        
+        fig.update_layout(height=600)
         st.plotly_chart(fig, use_container_width=True)
-        
-        # Monthly details table
-        with st.expander("📋 View Monthly Details"):
-            display_df = r["monthly_trend"].copy()
-            display_df["Month"] = display_df["month"].apply(
-                lambda x: month_names[x-1] if x <= len(month_names) else f"Month {x}"
-            )
-            display_df["Avg per Tx"] = display_df["Total Amount"] / display_df["Transaction Count"]
-            display_df = display_df[["Month", "Transaction Count", "Total Amount", "Avg per Tx"]]
-            st.dataframe(display_df, use_container_width=True)
     else:
         st.info("No monthly trend data available")
     
     # =========================
-    # Data Export Section
+    # Data Export
     # =========================
     st.markdown("## 📥 Data Export")
     
-    export_col1, export_col2, export_col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     
-    with export_col1:
-        # Export service summary
+    with col1:
         if not r["service_summary"].empty:
             csv_service = r["service_summary"].to_csv(index=False)
             st.download_button(
-                "📊 Download Service Summary",
+                "Download Service Summary",
                 data=csv_service,
                 file_name=f"service_summary_{analysis_year}.csv",
-                mime="text/csv",
-                use_container_width=True
+                mime="text/csv"
             )
     
-    with export_col2:
-        # Export monthly trend
+    with col2:
         if not r["monthly_trend"].empty:
             csv_monthly = r["monthly_trend"].to_csv(index=False)
             st.download_button(
-                "📈 Download Monthly Trend",
+                "Download Monthly Trend",
                 data=csv_monthly,
                 file_name=f"monthly_trend_{analysis_year}.csv",
-                mime="text/csv",
-                use_container_width=True
+                mime="text/csv"
             )
-    
-    with export_col3:
-        # Export KPI summary
-        report_data = {
-            'Metric': [
-                'Analysis Year',
-                'Active Agents',
-                'Active Tellers',
-                f'Onboarded {analysis_year}',
-                'Total Transactions',
-                'Total Volume (GMD)',
-                'Average Transaction (GMD)',
-                'Processing Time (seconds)',
-                'Sample Percentage'
-            ],
-            'Value': [
-                analysis_year,
-                r["total_active_agents"],
-                r["total_active_tellers"],
-                r["onboarded_year"],
-                r["total_transactions"],
-                r["total_volume"],
-                r.get("avg_transaction", 0),
-                f"{st.session_state.processing_time:.1f}",
-                f"{sample_percentage}%"
-            ]
-        }
-        report_df = pd.DataFrame(report_data)
-        csv_report = report_df.to_csv(index=False)
-        st.download_button(
-            "📋 Download KPI Report",
-            data=csv_report,
-            file_name=f"kpi_report_{analysis_year}.csv",
-            mime="text/csv",
-            use_container_width=True
-        )
-    
-    # =========================
-    # Data Preview (Optional - commented for large files)
-    # =========================
-    if st.checkbox("🔍 Preview Sample Data (First 100 rows)", value=False):
-        tab1, tab2 = st.tabs(["Onboarding Data", "Transactions Data"])
-        
-        with tab1:
-            if 'df_onboarding' in st.session_state:
-                st.dataframe(st.session_state.df_onboarding.head(100))
-                st.caption(f"Total rows: {len(st.session_state.df_onboarding):,}")
-        
-        with tab2:
-            if 'df_transactions' in st.session_state:
-                st.dataframe(st.session_state.df_transactions.head(100))
-                st.caption(f"Total rows: {len(st.session_state.df_transactions):,}")
-
-else:
-    # =========================
-    # Welcome/Instructions Section
-    # =========================
-    st.markdown("## 👋 Welcome to APS Wallet Dashboard")
-    
-    col1, col2 = st.columns([2, 1])
-    
-    with col1:
-        st.info("""
-        ### 📋 Ready to Analyze Your Data!
-        
-        **Your configured file paths:**
-        - **Onboarding:** `C:\\Users\\lamin\\Transaction\\Onboarding.csv`
-        - **Transactions:** `C:\\Users\\lamin\\Transaction\\Transactions.csv`
-        
-        **To get started:**
-        1. ✅ Verify files exist at above paths
-        2. 📅 Select analysis year (2023-2025)
-        3. ⚙️ Adjust sample percentage if needed for testing
-        4. 🚀 Click **Process Data** button
-        
-        **Features:**
-        - Optimized for 4GB+ files
-        - Progress tracking during loading
-        - Memory-efficient processing
-        - Exportable reports
-        """)
-    
-    with col2:
-        # File status cards
-        st.subheader("📁 File Status")
-        
-        if onboarding_info["exists"]:
-            st.success(f"**Onboarding.csv**\n{onboarding_info['size_formatted']}")
-        else:
-            st.error("Onboarding.csv not found")
-            
-        if transactions_info["exists"]:
-            st.success(f"**Transactions.csv**\n{transactions_info['size_formatted']}")
-        else:
-            st.error("Transactions.csv not found")
-        
-        if onboarding_info["exists"] and transactions_info["exists"]:
-            total_size = onboarding_info["size"] + transactions_info["size"]
-            st.metric("Total Data Size", format_file_size(total_size))
-        
-        st.markdown("---")
-        st.markdown("**Quick Tip:**")
-        st.caption("For faster testing with large files, reduce the sample percentage slider")
-    
-    # Quick action
-    if st.button("🚀 Start Processing Full Data", type="primary", use_container_width=True):
-        st.session_state.data_loaded = False
-        st.rerun()
 
 # =========================
 # Footer
 # =========================
 st.markdown("---")
 st.markdown(
-    """
+    f"""
     <div style="text-align:center;color:#6B7280;font-size:14px;">
-        <p>APS Wallet Dashboard v3.0 • Optimized for Large Files • Windows Paths Configured</p>
-        <p>Data Source: C:\\Users\\lamin\\Transaction\\</p>
-        <p>For support: analytics@apswallet.com | Last run: {}</p>
+        <p>APS Wallet Dashboard v3.1 • Windows File Finder Enabled</p>
+        <p>Current paths: {onboarding_path} | {transactions_path}</p>
+        <p>For support: analytics@apswallet.com</p>
     </div>
-    """.format(datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
+    """,
     unsafe_allow_html=True
 )
